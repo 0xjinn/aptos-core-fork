@@ -15,7 +15,10 @@ use crate::{
     txn_last_input_output::TxnLastInputOutput,
     view::{LatestView, ParallelState, SequentialState, ViewState},
 };
-use aptos_aggregator::{aggregator_change_set::AggregatorChange, delta_change_set::serialize};
+use aptos_aggregator::{
+    aggregator_change_set::{AggregatorChange, ApplyBase},
+    delta_change_set::serialize,
+};
 use aptos_logger::{debug, info};
 use aptos_mvhashmap::{
     types::{Incarnation, TxnIndex},
@@ -143,55 +146,48 @@ where
 
         // For tracking whether the recent execution wrote outside of the previous write/delta set.
         let mut updates_outside = false;
-        let mut apply_updates =
-            |output: &E::Output| {
-                // First, apply writes.
-                for (k, v) in output.resource_write_set().into_iter().chain(
-                    output
-                        .aggregator_v1_write_set()
-                        .into_iter()
-                        .map(|(state_key, write_op)| (state_key, (write_op, None))),
-                ) {
-                    if prev_modified_keys.remove(&k).is_none() {
-                        updates_outside = true;
-                    }
-                    versioned_cache
-                        .data()
-                        .write(k, idx_to_execute, incarnation, v);
+        let mut apply_updates = |output: &E::Output| {
+            // First, apply writes.
+            for (k, v) in output.resource_write_set().into_iter().chain(
+                output
+                    .aggregator_v1_write_set()
+                    .into_iter()
+                    .map(|(state_key, write_op)| (state_key, (write_op, None))),
+            ) {
+                if prev_modified_keys.remove(&k).is_none() {
+                    updates_outside = true;
+                }
+                versioned_cache
+                    .data()
+                    .write(k, idx_to_execute, incarnation, v);
+            }
+
+            for (k, v) in output.module_write_set().into_iter() {
+                if prev_modified_keys.remove(&k).is_none() {
+                    updates_outside = true;
+                }
+                versioned_cache.modules().write(k, idx_to_execute, v);
+            }
+
+            // Then, apply deltas.
+            for (k, d) in output.aggregator_v1_delta_set().into_iter() {
+                if prev_modified_keys.remove(&k).is_none() {
+                    updates_outside = true;
+                }
+                versioned_cache.data().add_delta(k, idx_to_execute, d);
+            }
+
+            for (id, change) in output.aggregator_v2_change_set().into_iter() {
+                if !prev_modified_aggregators.remove(&id) {
+                    updates_outside = true;
                 }
 
-                for (k, v) in output.module_write_set().into_iter() {
-                    if prev_modified_keys.remove(&k).is_none() {
-                        updates_outside = true;
-                    }
-                    versioned_cache.modules().write(k, idx_to_execute, v);
-                }
-
-                // Then, apply deltas.
-                for (k, d) in output.aggregator_v1_delta_set().into_iter() {
-                    if prev_modified_keys.remove(&k).is_none() {
-                        updates_outside = true;
-                    }
-                    versioned_cache.data().add_delta(k, idx_to_execute, d);
-                }
-
-                for (id, change) in output.aggregator_v2_change_set().into_iter() {
-                    if !prev_modified_aggregators.remove(&id) {
-                        updates_outside = true;
-                    }
-
-                    // TODO: figure out if change should update updates_outside
-                    // versioned_cache.aggregators().
-                    match change {
-                        AggregatorChange::Create(value) => versioned_cache
-                            .aggregators()
-                            .create_aggregator(id, idx_to_execute, value),
-                        AggregatorChange::Apply(apply) => versioned_cache
-                            .aggregators()
-                            .record_apply(id, idx_to_execute, apply),
-                    }
-                }
-            };
+                // TODO: figure out if change should update updates_outside
+                versioned_cache
+                    .aggregators()
+                    .record_change(id, idx_to_execute, change);
+            }
+        };
 
         let result = match execute_result {
             // These statuses are the results of speculative execution, so even for
@@ -687,8 +683,49 @@ where
                     accumulated_fee_statement.add_fee_statement(&fee_statement);
                     counters::update_sequential_txn_gas_counters(&fee_statement);
 
+                    // TODO for materialization, we need to understand what we read,
+                    // or do exchange on every transaction, so this logic might change
+                    let mut second_phase = Vec::new();
+                    let mut updates = HashMap::new();
+                    for (id, change) in output.aggregator_v2_change_set().into_iter() {
+                        match change {
+                            AggregatorChange::Create(value) => {
+                                updates.insert(id, value);
+                            },
+                            AggregatorChange::Apply(apply) => {
+                                match apply.get_apply_base_id(&id) {
+                                    ApplyBase::Previous(base_id) => {
+                                        updates.insert(
+                                            id,
+                                            apply
+                                                .apply_to_base(
+                                                    data_map.fetch_aggregator(&base_id).unwrap(),
+                                                )
+                                                .unwrap(),
+                                        );
+                                    },
+                                    ApplyBase::Current(base_id) => {
+                                        second_phase.push((id, base_id, apply));
+                                    },
+                                };
+                            },
+                        }
+                    }
+                    for (id, value) in updates.into_iter() {
+                        data_map.write_aggregator(id, value);
+                    }
+                    for (id, base_id, apply) in second_phase.into_iter() {
+                        data_map.write_aggregator(
+                            id,
+                            apply
+                                .apply_to_base(data_map.fetch_aggregator(&base_id).unwrap())
+                                .unwrap(),
+                        );
+                    }
+
                     // No delta writes are needed for sequential execution.
                     output.incorporate_delta_writes(vec![]);
+
                     //
                     if let Some(commit_hook) = &self.transaction_commit_hook {
                         commit_hook.on_transaction_committed(idx as TxnIndex, &output);

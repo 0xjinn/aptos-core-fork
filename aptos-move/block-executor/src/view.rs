@@ -567,7 +567,7 @@ impl<'a, T: Transaction, S: TStateView<Key = T::Key>, X: Executable> TAggregator
             ViewState::Unsync(state) => state.unsync_map.fetch_aggregator(id).ok_or_else(|| {
                 anyhow::Error::new(VMStatus::error(
                     StatusCode::STORAGE_ERROR,
-                    Some("Aggregator doesn't exist".to_string()),
+                    Some(format!("Aggregator for id {:?} doesn't exist", id)),
                 ))
             }),
         }

@@ -3,7 +3,7 @@
 
 use crate::types::{AtomicTxnIndex, MVAggregatorsError, TxnIndex};
 use aptos_aggregator::{
-    aggregator_change_set::{AggregatorApplyChange, ApplyBase},
+    aggregator_change_set::{AggregatorApplyChange, AggregatorChange, ApplyBase},
     types::AggregatorValue,
 };
 use claims::{assert_matches, assert_none};
@@ -376,6 +376,43 @@ impl<K: Eq + Hash + Clone + Debug + Copy> VersionedAggregators<K> {
         );
     }
 
+    /// Must be called when a snapshot (delta or derived) creation with a given ID
+    /// and initial apply is observed.
+    /// This should be only called when apply applies on top of different ID.
+    pub fn create_dependent_aggregator(
+        &self,
+        id: K,
+        txn_idx: TxnIndex,
+        apply: AggregatorApplyChange<K>,
+    ) {
+        let mut created = VersionedValue::new(None);
+        created.insert(txn_idx, VersionEntry::Apply(apply));
+
+        assert_none!(
+            self.values.insert(id, created),
+            "VerionedValue when creating aggregator ID may not already exist"
+        );
+    }
+
+    pub fn record_change(&self, id: K, txn_idx: TxnIndex, change: AggregatorChange<K>) {
+        match change {
+            AggregatorChange::Create(value) => self.create_aggregator(id, txn_idx, value),
+            AggregatorChange::Apply(apply) => match &apply {
+                AggregatorApplyChange::AggregatorDelta { .. } => {
+                    self.values
+                        .get_mut(&id)
+                        // TODO we probably cannot panic here any more (i.e. in V2 this might not be guaranteed)
+                        .expect("VersionedValue for an (resolved) ID must already exist")
+                        .insert(txn_idx, VersionEntry::Apply(apply))
+                },
+                AggregatorApplyChange::SnapshotDelta { .. }
+                | AggregatorApplyChange::SnapshotDerived { .. } => {
+                    self.create_dependent_aggregator(id, txn_idx, apply)
+                },
+            },
+        };
+    }
+
     /// The caller must maintain the invariant that prior to calling the methods below w.
     /// a particular aggregator ID, an invocation of either create_aggregator (for newly created
     /// aggregators), or set_base_value (for existing aggregators) must have been completed.
@@ -413,35 +450,6 @@ impl<K: Eq + Hash + Clone + Debug + Copy> VersionedAggregators<K> {
             .get_mut(&id)
             .expect("VersionedValue for an (resolved) ID must already exist")
             .read_latest_committed_value(self.next_idx_to_commit.load(Ordering::Relaxed))
-    }
-
-    /// If a value was derived from applying delta to a speculatively read value, we also
-    /// provide a delta. This is useful for the optimization where if the txn aborts and
-    /// the entry is marked as an estimate, reads may be able to bypass the Estimate entry
-    /// by optimistically applying the previous delta.
-    ///
-    /// Record value can also be used to finalize committed values in the data-structure,
-    /// in order to avoid potentially costly delta traversals in reads. Due to a use in
-    /// read_latest_committed_value, called frequently (as a part of aggregator implementation),
-    /// Upon commit Snapshot and Delta entries are all required to be replaced with Values.
-    pub fn record_value(
-        &self,
-        id: K,
-        txn_idx: TxnIndex,
-        value: AggregatorValue,
-        maybe_apply: Option<AggregatorApplyChange<K>>,
-    ) {
-        self.values
-            .get_mut(&id)
-            .expect("VersionedValue for an (resolved) ID must already exist")
-            .insert(txn_idx, VersionEntry::Value(value, maybe_apply));
-    }
-
-    pub fn record_apply(&self, id: K, txn_idx: TxnIndex, apply: AggregatorApplyChange<K>) {
-        self.values
-            .get_mut(&id)
-            .expect("VersionedValue for an (resolved) ID must already exist")
-            .insert(txn_idx, VersionEntry::Apply(apply));
     }
 
     pub fn mark_estimate(&self, id: K, txn_idx: TxnIndex) {
