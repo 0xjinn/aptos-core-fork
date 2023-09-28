@@ -22,6 +22,8 @@ class Flow(Flag):
     # Tests that are run manually when using a smaller representative mode.
     # (i.e. for measuring speed of the machine)
     REPRESENTATIVE = auto()
+    # Tests used for previewnet evaluation
+    PREVIEWNET = auto()
 
 
 @dataclass
@@ -85,6 +87,13 @@ TESTS = [
 
     RunGroupConfig(expected_tps=50000, key=RunGroupKey("coin_transfer_connected_components", executor_type="sharded", sharding_traffic_flags="--connected-tx-grps 5000", transaction_type_override=""), included_in=Flow.REPRESENTATIVE),
     RunGroupConfig(expected_tps=50000, key=RunGroupKey("coin_transfer_hotspot", executor_type="sharded", sharding_traffic_flags="--hotspot-probability 0.8", transaction_type_override=""), included_in=Flow.REPRESENTATIVE),
+
+    # setting separately for previewnet, as we run on a different number of cores.
+    RunGroupConfig(expected_tps=33000, key=RunGroupKey("coin-transfer"), included_in=Flow.PREVIEWNET),
+    RunGroupConfig(expected_tps=12000, key=RunGroupKey("account-generation"), included_in=Flow.PREVIEWNET),
+    RunGroupConfig(expected_tps=130, key=RunGroupKey("publish-package"), included_in=Flow.PREVIEWNET),
+    RunGroupConfig(expected_tps=1820, key=RunGroupKey("token-v2-ambassador-mint"), included_in=Flow.PREVIEWNET),
+    RunGroupConfig(expected_tps=10000, key=RunGroupKey("token-v2-ambassador-mint", module_working_set_size=100), included_in=Flow.PREVIEWNET),
 ]
 # fmt: on
 
@@ -99,16 +108,17 @@ NOISE_UPPER_LIMIT_WARN = 1.05
 # that are on top of this commit
 CODE_PERF_VERSION = "v4"
 
-NUMBER_OF_EXECUTION_THREADS = 8
+
+
 MAX_BLOCK_SIZE = int(os.environ.get("MAX_BLOCK_SIZE", default="10000"))
-NUM_BLOCKS = 15
+NUM_BLOCKS = int(os.environ.get("NUM_BLOCKS_PER_TEST", default=15))
 NUM_BLOCKS_DETAILED = 10
-NUM_ACCOUNTS = max([2000000, 4 * NUM_BLOCKS * MAX_BLOCK_SIZE])
+NUM_ACCOUNTS = max([int(os.environ.get("NUM_INIT_ACCOUNTS", default="2000000")), 4 * NUM_BLOCKS * MAX_BLOCK_SIZE])
 ADDITIONAL_DST_POOL_ACCOUNTS = 2 * NUM_BLOCKS * MAX_BLOCK_SIZE
 MAIN_SIGNER_ACCOUNTS = 2 * MAX_BLOCK_SIZE
 
 # default to using production number of execution threads for assertions
-NUMBER_OF_EXECUTION_THREADS = os.environ.get("NUMBER_OF_EXECUTION_THREADS", default=8)
+NUMBER_OF_EXECUTION_THREADS = int(os.environ.get("NUMBER_OF_EXECUTION_THREADS", default=8))
 
 if os.environ.get("DETAILED"):
     EXECUTION_ONLY_NUMBER_OF_THREADS = [1, 2, 4, 8, 16, 32, 60]
@@ -126,7 +136,7 @@ if os.environ.get("PROD_DB_FLAGS"):
     DB_CONFIG_FLAGS = ""
 else:
     DB_CONFIG_FLAGS = (
-        "--split-ledger-db --use-sharded-state-merkle-db --skip-index-and-usage"
+        "--split-ledger-db --use-sharded-state-merkle-db --skip-index-and-usage --enable-state-pruner --enable-ledger-pruner --enable-epoch-snapshot-pruner --ledger-pruning-batch-size 10000"
     )
 
 # Run the single node with performance optimizations enabled
@@ -316,7 +326,8 @@ with tempfile.TemporaryDirectory() as tmpdirname:
             executor_type_str = f"--async-partitioning --num-executor-shards {NUMBER_OF_EXECUTION_THREADS} {sharding_traffic_flags}"
         else:
             raise Exception(f"executor type not supported {test.key.executor_type}")
-        common_command_suffix = f"{executor_type_str} --generate-then-execute --block-size {cur_block_size} {DB_CONFIG_FLAGS} run-executor {workload_args_str} --module-working-set-size {test.key.module_working_set_size} --main-signer-accounts {MAIN_SIGNER_ACCOUNTS} --additional-dst-pool-accounts {ADDITIONAL_DST_POOL_ACCOUNTS} --data-dir {tmpdirname}/db  --checkpoint-dir {tmpdirname}/cp"
+        txn_emitter_prefix_str = "" if NUM_BLOCKS > 20 else " --generate-then-execute"
+        common_command_suffix = f"{executor_type_str} {txn_emitter_prefix_str} --block-size {cur_block_size} {DB_CONFIG_FLAGS} run-executor {workload_args_str} --module-working-set-size {test.key.module_working_set_size} --main-signer-accounts {MAIN_SIGNER_ACCOUNTS} --additional-dst-pool-accounts {ADDITIONAL_DST_POOL_ACCOUNTS} --data-dir {tmpdirname}/db  --checkpoint-dir {tmpdirname}/cp"
 
         number_of_threads_results = {}
 
