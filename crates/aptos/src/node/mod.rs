@@ -100,7 +100,12 @@ impl NodeTool {
             ShowValidatorSet(tool) => tool.execute_serialized().await,
             ShowValidatorStake(tool) => tool.execute_serialized().await,
             ShowValidatorConfig(tool) => tool.execute_serialized().await,
-            RunLocalTestnet(tool) => tool.execute_serialized_without_logger().await,
+            RunLocalTestnet(tool) => {
+                // We don't want the final result to appear as JSON for this command
+                // so we just call execute directly. TODO: What about telemetry?
+                let _ = tool.execute().await;
+                Ok("".to_string())
+            },
             UpdateConsensusKey(tool) => tool.execute_serialized().await,
             UpdateValidatorNetworkAddresses(tool) => tool.execute_serialized().await,
         }
