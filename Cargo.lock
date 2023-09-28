@@ -258,6 +258,7 @@ dependencies = [
  "clap_complete",
  "codespan-reporting",
  "dashmap",
+ "diesel",
  "dirs",
  "futures",
  "hex",
